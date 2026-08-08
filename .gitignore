@@ -1,0 +1,23 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build
+[Bb]in/
+[Oo]bj/
+
+# NuGet
+packages/
+
+# Revit
+*.addin.cache
+
+# Logs / temporales
+*.log
+*.tmp
+
+# Excel local
+*.xlsx
+*.xlsm
+*.xls
