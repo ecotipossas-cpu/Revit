@@ -14,11 +14,9 @@ namespace BimDataSync
     public class BimDataSyncCommand : IExternalCommand
     {
         // ============================================================
-        // RUTA DEL ARCHIVO EXCEL
+        // CONFIGURACION
         // ============================================================
-
-        private const string ExcelPath =
-            @"E:\PC\Escritorio\CORREDORES VIALES CUNDINAMARCA\C#\Asignar data a elementos\Data contenciones.xlsx";
+        // La matriz Excel y la hoja se seleccionan al ejecutar el comando.
 
 
         public Result Execute(
@@ -30,17 +28,22 @@ namespace BimDataSync
             Document doc = uidoc.Document;
 
             // --------------------------------------------------------
-            // Verificar archivo
+            // 1. Seleccionar matriz Excel
             // --------------------------------------------------------
 
-            if (!File.Exists(ExcelPath))
-            {
-                TaskDialog.Show(
-                    "BimDataSync",
-                    "No se encontró el archivo Excel:\n\n" + ExcelPath);
+            string excelPath = SelectExcelFile();
 
-                return Result.Failed;
-            }
+            if (string.IsNullOrWhiteSpace(excelPath))
+                return Result.Cancelled;
+
+            // --------------------------------------------------------
+            // 2. Seleccionar hoja
+            // --------------------------------------------------------
+
+            string sheetName = SelectWorksheet(excelPath);
+
+            if (string.IsNullOrWhiteSpace(sheetName))
+                return Result.Cancelled;
 
             int hojasProcesadas = 0;
             int filasProcesadas = 0;
@@ -53,7 +56,6 @@ namespace BimDataSync
 
             List<string> logErrores = new List<string>();
 
-            // NUEVO: lista detallada de parámetros no encontrados
             List<ParametroNoEncontrado> parametrosNoEncontradosLista =
                 new List<ParametroNoEncontrado>();
 
@@ -61,12 +63,8 @@ namespace BimDataSync
             // Abrir Excel
             // --------------------------------------------------------
 
-            using (XLWorkbook workbook = new XLWorkbook(ExcelPath))
+            using (XLWorkbook workbook = new XLWorkbook(excelPath))
             {
-                // ----------------------------------------------------
-                // TRANSACTION
-                // ----------------------------------------------------
-
                 using (Transaction trans = new Transaction(
                     doc,
                     "BimDataSync - Asignar datos"))
@@ -74,66 +72,68 @@ namespace BimDataSync
                     trans.Start();
 
                     // =================================================
-                    // RECORRER TODAS LAS HOJAS
+                    // PROCESAR LA HOJA SELECCIONADA
                     // =================================================
 
-                    foreach (IXLWorksheet worksheet in workbook.Worksheets)
+                    IXLWorksheet worksheet =
+                        workbook.Worksheet(sheetName);
+
+                    hojasProcesadas++;
+
+                    IXLRange usedRange = worksheet.RangeUsed();
+
+                    if (usedRange == null)
                     {
-                        hojasProcesadas++;
+                        trans.Commit();
 
-                        IXLRange usedRange = worksheet.RangeUsed();
+                        TaskDialog.Show(
+                            "BimDataSync",
+                            "La hoja seleccionada no contiene datos.");
 
-                        if (usedRange == null)
+                        return Result.Succeeded;
+                    }
+
+                    // ------------------------------------------------
+                    // Leer encabezados
+                    // ------------------------------------------------
+
+                    var headerRow = usedRange.FirstRow();
+
+                    Dictionary<int, string> headers =
+                        new Dictionary<int, string>();
+
+                    int elementIdColumn = -1;
+
+                    foreach (IXLCell cell in headerRow.Cells())
+                    {
+                        string header = cell.Value.ToString().Trim();
+
+                        if (string.IsNullOrWhiteSpace(header))
                             continue;
 
-                        // ------------------------------------------------
-                        // Leer encabezados
-                        // ------------------------------------------------
+                        headers[cell.Address.ColumnNumber] = header;
 
-                        var headerRow = usedRange.FirstRow();
-
-                        Dictionary<int, string> headers =
-                            new Dictionary<int, string>();
-
-                        int elementIdColumn = -1;
-
-                        foreach (IXLCell cell in headerRow.Cells())
+                        if (string.Equals(
+                                header,
+                                "ElementID",
+                                StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(
+                                header,
+                                "ElementId",
+                                StringComparison.OrdinalIgnoreCase))
                         {
-                            string header = cell.Value
-                                .ToString()
-                                .Trim();
-
-                            if (string.IsNullOrWhiteSpace(header))
-                                continue;
-
-                            headers[cell.Address.ColumnNumber] = header;
-
-                            // Aceptamos ElementID y ElementId
-                            if (string.Equals(
-                                    header,
-                                    "ElementID",
-                                    StringComparison.OrdinalIgnoreCase) ||
-                                string.Equals(
-                                    header,
-                                    "ElementId",
-                                    StringComparison.OrdinalIgnoreCase))
-                            {
-                                elementIdColumn = cell.Address.ColumnNumber;
-                            }
+                            elementIdColumn =
+                                cell.Address.ColumnNumber;
                         }
+                    }
 
-                        // ------------------------------------------------
-                        // Si la hoja no tiene ElementID, la saltamos
-                        // ------------------------------------------------
-
-                        if (elementIdColumn == -1)
-                        {
-                            logErrores.Add(
-                                $"Hoja '{worksheet.Name}': no se encontró columna ElementID.");
-
-                            continue;
-                        }
-
+                    if (elementIdColumn == -1)
+                    {
+                        logErrores.Add(
+                            $"Hoja '{worksheet.Name}': no se encontró columna ElementID.");
+                    }
+                    else
+                    {
                         // =================================================
                         // RECORRER FILAS
                         // =================================================
@@ -143,10 +143,6 @@ namespace BimDataSync
                             try
                             {
                                 filasProcesadas++;
-
-                                // -----------------------------------------
-                                // Leer ElementID
-                                // -----------------------------------------
 
                                 string elementIdText = row
                                     .Cell(elementIdColumn)
@@ -163,8 +159,6 @@ namespace BimDataSync
                                         CultureInfo.InvariantCulture,
                                         out int elementIdInteger))
                                 {
-                                    // Intentar por si Excel lo entrega
-                                    // como número decimal
                                     if (!double.TryParse(
                                             elementIdText,
                                             NumberStyles.Any,
@@ -183,10 +177,6 @@ namespace BimDataSync
                                     elementIdInteger =
                                         Convert.ToInt32(tempDouble);
                                 }
-
-                                // -----------------------------------------
-                                // Obtener elemento Revit
-                                // -----------------------------------------
 
                                 ElementId elementId =
                                     new ElementId((long)elementIdInteger);
@@ -216,13 +206,8 @@ namespace BimDataSync
                                     int columnNumber = header.Key;
                                     string parameterName = header.Value;
 
-                                    // No modificar ElementID
                                     if (columnNumber == elementIdColumn)
                                         continue;
-
-                                    // ---------------------------------------------
-                                    // Buscar parámetro por nombre
-                                    // ---------------------------------------------
 
                                     Parameter parameter =
                                         element.LookupParameter(parameterName);
@@ -231,7 +216,6 @@ namespace BimDataSync
                                     {
                                         parametrosNoEncontrados++;
 
-                                        // NUEVO: guardar detalle
                                         parametrosNoEncontradosLista.Add(
                                             new ParametroNoEncontrado
                                             {
@@ -244,10 +228,6 @@ namespace BimDataSync
                                         continue;
                                     }
 
-                                    // ---------------------------------------------
-                                    // Verificar si se puede escribir
-                                    // ---------------------------------------------
-
                                     if (parameter.IsReadOnly)
                                     {
                                         parametrosSoloLectura++;
@@ -258,10 +238,6 @@ namespace BimDataSync
 
                                         continue;
                                     }
-
-                                    // ---------------------------------------------
-                                    // Valor Excel
-                                    // ---------------------------------------------
 
                                     IXLCell cell =
                                         row.Cell(columnNumber);
@@ -274,10 +250,6 @@ namespace BimDataSync
 
                                     if (string.IsNullOrWhiteSpace(value))
                                         continue;
-
-                                    // ---------------------------------------------
-                                    // Asignar valor
-                                    // ---------------------------------------------
 
                                     if (SetParameterValue(parameter, value))
                                     {
@@ -315,6 +287,7 @@ namespace BimDataSync
 
             string rutaReporte =
                 CrearReporteParametrosNoEncontrados(
+                    excelPath,
                     parametrosNoEncontradosLista);
 
             // ============================================================
@@ -323,6 +296,9 @@ namespace BimDataSync
 
             string resumen =
                 "Proceso terminado.\n\n" +
+
+                $"Matriz: {Path.GetFileName(excelPath)}\n" +
+                $"Hoja: {sheetName}\n\n" +
 
                 $"Hojas procesadas: {hojasProcesadas}\n" +
                 $"Filas procesadas: {filasProcesadas}\n" +
@@ -344,18 +320,122 @@ namespace BimDataSync
         }
 
 
+        // ============================================================
+        // SELECT EXCEL FILE
+        // ============================================================
+
+        private string SelectExcelFile()
+        {
+            using (
+                System.Windows.Forms.OpenFileDialog dialog =
+                    new System.Windows.Forms.OpenFileDialog())
+            {
+                dialog.Title =
+                    "Seleccionar matriz Excel";
+
+                dialog.Filter =
+                    "Excel files (*.xlsx)|*.xlsx|All files (*.*)|*.*";
+
+                dialog.Multiselect = false;
+
+                if (dialog.ShowDialog() ==
+                    System.Windows.Forms.DialogResult.OK)
+                {
+                    return dialog.FileName;
+                }
+            }
+
+            return null;
+        }
+
+
+        // ============================================================
+        // SELECT WORKSHEET
+        // ============================================================
+
+        private string SelectWorksheet(
+            string excelPath)
+        {
+            using (
+                XLWorkbook workbook =
+                    new XLWorkbook(excelPath))
+            {
+                List<string> sheetNames =
+                    workbook.Worksheets
+                        .Select(ws => ws.Name)
+                        .ToList();
+
+                if (sheetNames.Count == 0)
+                {
+                    throw new Exception(
+                        "El archivo Excel seleccionado no contiene hojas.");
+                }
+
+                string sheetList = "";
+
+                for (
+                    int i = 0;
+                    i < sheetNames.Count;
+                    i++)
+                {
+                    sheetList +=
+                        $"{i + 1} - {sheetNames[i]}\r\n";
+                }
+
+                string input =
+                    Microsoft.VisualBasic.Interaction.InputBox(
+                        "Seleccione el número de la hoja:\r\n\r\n" +
+                        sheetList,
+                        "Seleccionar hoja",
+                        "1");
+
+                if (string.IsNullOrWhiteSpace(input))
+                {
+                    return null;
+                }
+
+                int selectedNumber;
+
+                if (!int.TryParse(
+                        input,
+                        out selectedNumber))
+                {
+                    TaskDialog.Show(
+                        "BimDataSync",
+                        "Número de hoja inválido.");
+
+                    return null;
+                }
+
+                if (
+                    selectedNumber < 1 ||
+                    selectedNumber > sheetNames.Count)
+                {
+                    TaskDialog.Show(
+                        "BimDataSync",
+                        "El número de hoja está fuera de rango.");
+
+                    return null;
+                }
+
+                return sheetNames[selectedNumber - 1];
+            }
+        }
+
+
         // ================================================================
         // CREAR REPORTE DE PARAMETROS NO ENCONTRADOS
         // ================================================================
 
         private string CrearReporteParametrosNoEncontrados(
+            string excelPath,
             List<ParametroNoEncontrado> lista)
         {
             string carpeta =
-                Path.GetDirectoryName(ExcelPath);
+                Path.GetDirectoryName(excelPath);
 
             string nombreArchivo =
-                Path.GetFileNameWithoutExtension(ExcelPath);
+                Path.GetFileNameWithoutExtension(excelPath);
 
             string rutaReporte =
                 Path.Combine(

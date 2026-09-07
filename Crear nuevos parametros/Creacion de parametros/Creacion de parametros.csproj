@@ -91,6 +91,7 @@
   <ItemGroup>
     <Compile Include="BimDataSyncCommand.cs" />
     <Compile Include="Command.cs" />
+    <Compile Include="GetIds.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
