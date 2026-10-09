@@ -832,6 +832,15 @@ namespace ICCU_CrearParametros
             }
 
 
+            // Revit 2024 supports Stationing as a parameter spec.
+            // Accept both the correct spelling and the old matrix typo.
+            if (cleanType == "stationing" ||
+                cleanType == "stationig")
+            {
+                return SpecTypeId.Stationing;
+            }
+
+
             if (cleanType == "yesno")
             {
                 return SpecTypeId.Boolean.YesNo;

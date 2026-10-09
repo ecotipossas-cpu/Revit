@@ -13,12 +13,6 @@ namespace BimDataSync
     [Transaction(TransactionMode.Manual)]
     public class BimDataSyncCommand : IExternalCommand
     {
-        // ============================================================
-        // CONFIGURACION
-        // ============================================================
-        // La matriz Excel y la hoja se seleccionan al ejecutar el comando.
-
-
         public Result Execute(
             ExternalCommandData commandData,
             ref string message,
@@ -27,18 +21,18 @@ namespace BimDataSync
             UIDocument uidoc = commandData.Application.ActiveUIDocument;
             Document doc = uidoc.Document;
 
-            // --------------------------------------------------------
-            // 1. Seleccionar matriz Excel
-            // --------------------------------------------------------
+            // ============================================================
+            // 1. SELECCIONAR MATRIZ EXCEL
+            // ============================================================
 
             string excelPath = SelectExcelFile();
 
             if (string.IsNullOrWhiteSpace(excelPath))
                 return Result.Cancelled;
 
-            // --------------------------------------------------------
-            // 2. Seleccionar hoja
-            // --------------------------------------------------------
+            // ============================================================
+            // 2. SELECCIONAR HOJA
+            // ============================================================
 
             string sheetName = SelectWorksheet(excelPath);
 
@@ -48,56 +42,47 @@ namespace BimDataSync
             int hojasProcesadas = 0;
             int filasProcesadas = 0;
             int elementosEncontrados = 0;
+            int valoresProcesados = 0;
             int valoresAsignados = 0;
-            int parametrosNoEncontrados = 0;
             int elementosNoEncontrados = 0;
+            int parametrosNoEncontrados = 0;
             int parametrosSoloLectura = 0;
             int errores = 0;
 
             List<string> logErrores = new List<string>();
 
+            // Lista de parámetros realmente no encontrados.
+            // SOLO se registra cuando la celda Excel tiene un valor.
             List<ParametroNoEncontrado> parametrosNoEncontradosLista =
                 new List<ParametroNoEncontrado>();
 
-            // --------------------------------------------------------
-            // Abrir Excel
-            // --------------------------------------------------------
+            // Registro completo de cada intento de sincronización.
+            List<RegistroSincronizacion> registros =
+                new List<RegistroSincronizacion>();
 
-            using (XLWorkbook workbook = new XLWorkbook(excelPath))
+            try
             {
-                using (Transaction trans = new Transaction(
-                    doc,
-                    "BimDataSync - Asignar datos"))
+                using (XLWorkbook workbook = new XLWorkbook(excelPath))
                 {
-                    trans.Start();
-
-                    // =================================================
-                    // PROCESAR LA HOJA SELECCIONADA
-                    // =================================================
-
-                    IXLWorksheet worksheet =
-                        workbook.Worksheet(sheetName);
-
-                    hojasProcesadas++;
+                    IXLWorksheet worksheet = workbook.Worksheet(sheetName);
+                    hojasProcesadas = 1;
 
                     IXLRange usedRange = worksheet.RangeUsed();
 
                     if (usedRange == null)
                     {
-                        trans.Commit();
-
                         TaskDialog.Show(
                             "BimDataSync",
                             "La hoja seleccionada no contiene datos.");
 
-                        return Result.Succeeded;
+                        return Result.Failed;
                     }
 
-                    // ------------------------------------------------
-                    // Leer encabezados
-                    // ------------------------------------------------
+                    // ========================================================
+                    // LEER ENCABEZADOS
+                    // ========================================================
 
-                    var headerRow = usedRange.FirstRow();
+                    IXLRangeRow headerRow = usedRange.FirstRow();
 
                     Dictionary<int, string> headers =
                         new Dictionary<int, string>();
@@ -106,7 +91,9 @@ namespace BimDataSync
 
                     foreach (IXLCell cell in headerRow.Cells())
                     {
-                        string header = cell.Value.ToString().Trim();
+                        string header = cell.Value
+                            .ToString()
+                            .Trim();
 
                         if (string.IsNullOrWhiteSpace(header))
                             continue;
@@ -122,23 +109,34 @@ namespace BimDataSync
                                 "ElementId",
                                 StringComparison.OrdinalIgnoreCase))
                         {
-                            elementIdColumn =
-                                cell.Address.ColumnNumber;
+                            elementIdColumn = cell.Address.ColumnNumber;
                         }
                     }
 
                     if (elementIdColumn == -1)
                     {
-                        logErrores.Add(
-                            $"Hoja '{worksheet.Name}': no se encontró columna ElementID.");
-                    }
-                    else
-                    {
-                        // =================================================
-                        // RECORRER FILAS
-                        // =================================================
+                        TaskDialog.Show(
+                            "BimDataSync",
+                            "La hoja seleccionada no contiene una columna ElementID.");
 
-                        foreach (var row in usedRange.RowsUsed().Skip(1))
+                        return Result.Failed;
+                    }
+
+                    // ========================================================
+                    // TRANSACTION
+                    // ========================================================
+
+                    using (Transaction trans = new Transaction(
+                        doc,
+                        "BimDataSync - Asignar datos"))
+                    {
+                        trans.Start();
+
+                        // ====================================================
+                        // RECORRER FILAS
+                        // ====================================================
+
+                        foreach (IXLRangeRow row in usedRange.RowsUsed().Skip(1))
                         {
                             try
                             {
@@ -153,11 +151,13 @@ namespace BimDataSync
                                 if (string.IsNullOrWhiteSpace(elementIdText))
                                     continue;
 
-                                if (!int.TryParse(
+                                long elementIdInteger;
+
+                                if (!long.TryParse(
                                         elementIdText,
                                         NumberStyles.Integer,
                                         CultureInfo.InvariantCulture,
-                                        out int elementIdInteger))
+                                        out elementIdInteger))
                                 {
                                     if (!double.TryParse(
                                             elementIdText,
@@ -174,12 +174,11 @@ namespace BimDataSync
                                         continue;
                                     }
 
-                                    elementIdInteger =
-                                        Convert.ToInt32(tempDouble);
+                                    elementIdInteger = Convert.ToInt64(tempDouble);
                                 }
 
                                 ElementId elementId =
-                                    new ElementId((long)elementIdInteger);
+                                    new ElementId(elementIdInteger);
 
                                 Element element =
                                     doc.GetElement(elementId);
@@ -197,9 +196,12 @@ namespace BimDataSync
 
                                 elementosEncontrados++;
 
-                                // =================================================
-                                // RECORRER COLUMNAS / PARÁMETROS
-                                // =================================================
+                                // ====================================================
+                                // RECORRER COLUMNAS / PARAMETROS
+                                // IMPORTANTE:
+                                // Primero se lee el valor Excel.
+                                // Si está vacío, NO se busca ni se reporta el parámetro.
+                                // ====================================================
 
                                 foreach (KeyValuePair<int, string> header in headers)
                                 {
@@ -208,6 +210,24 @@ namespace BimDataSync
 
                                     if (columnNumber == elementIdColumn)
                                         continue;
+
+                                    IXLCell cell = row.Cell(columnNumber);
+
+                                    if (cell.IsEmpty())
+                                        continue;
+
+                                    string value = cell.Value
+                                        .ToString()
+                                        .Trim();
+
+                                    if (string.IsNullOrWhiteSpace(value))
+                                        continue;
+
+                                    valoresProcesados++;
+
+                                    // ---------------------------------------------
+                                    // Buscar parámetro
+                                    // ---------------------------------------------
 
                                     Parameter parameter =
                                         element.LookupParameter(parameterName);
@@ -222,47 +242,94 @@ namespace BimDataSync
                                                 Hoja = worksheet.Name,
                                                 Fila = row.RowNumber(),
                                                 ElementID = elementIdInteger,
-                                                Parametro = parameterName
+                                                Parametro = parameterName,
+                                                ValorExcel = value
+                                            });
+
+                                        registros.Add(
+                                            new RegistroSincronizacion
+                                            {
+                                                Hoja = worksheet.Name,
+                                                Fila = row.RowNumber(),
+                                                ElementID = elementIdInteger,
+                                                Parametro = parameterName,
+                                                ValorExcel = value,
+                                                Estado = "NO ENCONTRADO",
+                                                Detalle = "El parámetro no existe en el elemento."
                                             });
 
                                         continue;
                                     }
 
+                                    // ---------------------------------------------
+                                    // Read Only
+                                    // ---------------------------------------------
+
                                     if (parameter.IsReadOnly)
                                     {
                                         parametrosSoloLectura++;
 
-                                        logErrores.Add(
-                                            $"Elemento {elementIdInteger}: " +
-                                            $"parámetro '{parameterName}' es Read Only.");
+                                        registros.Add(
+                                            new RegistroSincronizacion
+                                            {
+                                                Hoja = worksheet.Name,
+                                                Fila = row.RowNumber(),
+                                                ElementID = elementIdInteger,
+                                                Parametro = parameterName,
+                                                ValorExcel = value,
+                                                Estado = "READ ONLY",
+                                                Detalle = "El parámetro existe pero es de solo lectura."
+                                            });
 
                                         continue;
                                     }
 
-                                    IXLCell cell =
-                                        row.Cell(columnNumber);
+                                    // ---------------------------------------------
+                                    // Asignar valor
+                                    // ---------------------------------------------
 
-                                    if (cell.IsEmpty())
-                                        continue;
+                                    string detalleAsignacion;
 
-                                    string value =
-                                        cell.Value.ToString().Trim();
-
-                                    if (string.IsNullOrWhiteSpace(value))
-                                        continue;
-
-                                    if (SetParameterValue(parameter, value))
+                                    if (SetParameterValue(
+                                            parameter,
+                                            value,
+                                            out detalleAsignacion))
                                     {
                                         valoresAsignados++;
+
+                                        registros.Add(
+                                            new RegistroSincronizacion
+                                            {
+                                                Hoja = worksheet.Name,
+                                                Fila = row.RowNumber(),
+                                                ElementID = elementIdInteger,
+                                                Parametro = parameterName,
+                                                ValorExcel = value,
+                                                Estado = "ASIGNADO",
+                                                Detalle = detalleAsignacion
+                                            });
                                     }
                                     else
                                     {
                                         errores++;
 
+                                        registros.Add(
+                                            new RegistroSincronizacion
+                                            {
+                                                Hoja = worksheet.Name,
+                                                Fila = row.RowNumber(),
+                                                ElementID = elementIdInteger,
+                                                Parametro = parameterName,
+                                                ValorExcel = value,
+                                                Estado = "ERROR ASIGNACION",
+                                                Detalle = detalleAsignacion
+                                            });
+
                                         logErrores.Add(
-                                            $"Elemento {elementIdInteger}: " +
-                                            $"no se pudo asignar '{value}' " +
-                                            $"al parámetro '{parameterName}'.");
+                                            $"Hoja '{worksheet.Name}', fila {row.RowNumber()}, " +
+                                            $"ElementID {elementIdInteger}: " +
+                                            $"no se pudo asignar '{value}' al parámetro " +
+                                            $"'{parameterName}'. {detalleAsignacion}");
                                     }
                                 }
                             }
@@ -275,20 +342,32 @@ namespace BimDataSync
                                     ex.Message);
                             }
                         }
-                    }
 
-                    trans.Commit();
+                        trans.Commit();
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                TaskDialog.Show(
+                    "BimDataSync",
+                    "Se produjo un error durante el proceso:\n\n" +
+                    ex.Message);
+
+                return Result.Failed;
             }
 
             // ============================================================
-            // CREAR REPORTE DE PARAMETROS NO ENCONTRADOS
+            // REPORTE
             // ============================================================
 
             string rutaReporte =
-                CrearReporteParametrosNoEncontrados(
+                CrearReporte(
                     excelPath,
-                    parametrosNoEncontradosLista);
+                    sheetName,
+                    parametrosNoEncontradosLista,
+                    registros,
+                    logErrores);
 
             // ============================================================
             // RESUMEN
@@ -296,46 +375,35 @@ namespace BimDataSync
 
             string resumen =
                 "Proceso terminado.\n\n" +
-
                 $"Matriz: {Path.GetFileName(excelPath)}\n" +
                 $"Hoja: {sheetName}\n\n" +
-
-                $"Hojas procesadas: {hojasProcesadas}\n" +
                 $"Filas procesadas: {filasProcesadas}\n" +
                 $"Elementos encontrados: {elementosEncontrados}\n" +
+                $"Valores con dato en Excel: {valoresProcesados}\n" +
                 $"Valores asignados: {valoresAsignados}\n\n" +
-
                 $"Elementos no encontrados: {elementosNoEncontrados}\n" +
                 $"Parámetros no encontrados: {parametrosNoEncontrados}\n" +
                 $"Parámetros Read Only: {parametrosSoloLectura}\n" +
-                $"Errores: {errores}\n\n" +
-
-                (parametrosNoEncontrados > 0
-                    ? "Reporte generado:\n" + rutaReporte
-                    : "No hubo parámetros no encontrados.");
+                $"Errores de asignación: {errores}\n\n" +
+                "Reporte generado:\n" + rutaReporte;
 
             TaskDialog.Show("BimDataSync", resumen);
 
             return Result.Succeeded;
         }
 
-
         // ============================================================
-        // SELECT EXCEL FILE
+        // SELECCIONAR EXCEL
         // ============================================================
 
         private string SelectExcelFile()
         {
-            using (
-                System.Windows.Forms.OpenFileDialog dialog =
-                    new System.Windows.Forms.OpenFileDialog())
+            using (System.Windows.Forms.OpenFileDialog dialog =
+                new System.Windows.Forms.OpenFileDialog())
             {
-                dialog.Title =
-                    "Seleccionar matriz Excel";
-
+                dialog.Title = "Seleccionar matriz Excel";
                 dialog.Filter =
                     "Excel files (*.xlsx)|*.xlsx|All files (*.*)|*.*";
-
                 dialog.Multiselect = false;
 
                 if (dialog.ShowDialog() ==
@@ -348,35 +416,30 @@ namespace BimDataSync
             return null;
         }
 
-
         // ============================================================
-        // SELECT WORKSHEET
+        // SELECCIONAR HOJA
         // ============================================================
 
-        private string SelectWorksheet(
-            string excelPath)
+        private string SelectWorksheet(string excelPath)
         {
-            using (
-                XLWorkbook workbook =
-                    new XLWorkbook(excelPath))
+            using (XLWorkbook workbook = new XLWorkbook(excelPath))
             {
-                List<string> sheetNames =
-                    workbook.Worksheets
-                        .Select(ws => ws.Name)
-                        .ToList();
+                List<string> sheetNames = workbook.Worksheets
+                    .Select(ws => ws.Name)
+                    .ToList();
 
                 if (sheetNames.Count == 0)
                 {
-                    throw new Exception(
+                    TaskDialog.Show(
+                        "BimDataSync",
                         "El archivo Excel seleccionado no contiene hojas.");
+
+                    return null;
                 }
 
                 string sheetList = "";
 
-                for (
-                    int i = 0;
-                    i < sheetNames.Count;
-                    i++)
+                for (int i = 0; i < sheetNames.Count; i++)
                 {
                     sheetList +=
                         $"{i + 1} - {sheetNames[i]}\r\n";
@@ -390,15 +453,9 @@ namespace BimDataSync
                         "1");
 
                 if (string.IsNullOrWhiteSpace(input))
-                {
                     return null;
-                }
 
-                int selectedNumber;
-
-                if (!int.TryParse(
-                        input,
-                        out selectedNumber))
+                if (!int.TryParse(input, out int selectedNumber))
                 {
                     TaskDialog.Show(
                         "BimDataSync",
@@ -407,8 +464,7 @@ namespace BimDataSync
                     return null;
                 }
 
-                if (
-                    selectedNumber < 1 ||
+                if (selectedNumber < 1 ||
                     selectedNumber > sheetNames.Count)
                 {
                     TaskDialog.Show(
@@ -422,14 +478,197 @@ namespace BimDataSync
             }
         }
 
+        // ============================================================
+        // ASIGNAR VALOR AL PARAMETRO
+        // ============================================================
 
-        // ================================================================
-        // CREAR REPORTE DE PARAMETROS NO ENCONTRADOS
-        // ================================================================
+        private bool SetParameterValue(
+            Parameter parameter,
+            string value,
+            out string detalle)
+        {
+            detalle = "";
 
-        private string CrearReporteParametrosNoEncontrados(
+            try
+            {
+                switch (parameter.StorageType)
+                {
+                    // ----------------------------------------------------
+                    // STRING
+                    // ----------------------------------------------------
+
+                    case StorageType.String:
+
+                        parameter.Set(value);
+                        detalle = "Texto asignado correctamente.";
+                        return true;
+
+                    // ----------------------------------------------------
+                    // INTEGER
+                    // ----------------------------------------------------
+
+                    case StorageType.Integer:
+
+                        if (int.TryParse(
+                                value,
+                                NumberStyles.Integer,
+                                CultureInfo.CurrentCulture,
+                                out int intValue) ||
+                            int.TryParse(
+                                value,
+                                NumberStyles.Integer,
+                                CultureInfo.InvariantCulture,
+                                out intValue))
+                        {
+                            parameter.Set(intValue);
+                            detalle = "Entero asignado correctamente.";
+                            return true;
+                        }
+
+                        detalle =
+                            "El valor no pudo convertirse a Integer.";
+                        return false;
+
+                    // ----------------------------------------------------
+                    // DOUBLE
+                    // ----------------------------------------------------
+
+                    case StorageType.Double:
+
+                        if (!TryParseDouble(value, out double doubleValue))
+                        {
+                            detalle =
+                                "El valor no pudo convertirse a número.";
+                            return false;
+                        }
+
+                        // ------------------------------------------------
+                        // IMPORTANTE:
+                        // Los parámetros BIM_Quantities de la matriz fueron
+                        // creados como tipo Number. En ese caso NO debemos
+                        // convertir el valor a pies internos de Revit.
+                        // 92.33 debe quedar como 92.33.
+                        // ------------------------------------------------
+
+                        // En Revit 2024, "Number" es un SPEC, no un UnitTypeId.
+                        // Por eso se debe comprobar mediante Definition.GetDataType().
+                        ForgeTypeId dataType =
+                            parameter.Definition.GetDataType();
+
+                        if (dataType == SpecTypeId.Number)
+                        {
+                            parameter.Set(doubleValue);
+                            detalle =
+                                "Number: valor asignado directamente sin conversión de unidades.";
+                            return true;
+                        }
+
+                        // Para parámetros que realmente tienen una unidad
+                        // Revit (Length, Area, Volume, etc.), sí convertir.
+                        ForgeTypeId unitTypeId =
+                            parameter.GetUnitTypeId();
+
+                        double internalValue =
+                            UnitUtils.ConvertToInternalUnits(
+                                doubleValue,
+                                unitTypeId);
+
+                        parameter.Set(internalValue);
+
+                        detalle =
+                            "Valor numérico convertido a unidades internas de Revit.";
+
+                        return true;
+
+                    // ----------------------------------------------------
+                    // ELEMENT ID
+                    // ----------------------------------------------------
+
+                    case StorageType.ElementId:
+
+                        if (long.TryParse(
+                                value,
+                                NumberStyles.Integer,
+                                CultureInfo.CurrentCulture,
+                                out long referencedId) ||
+                            long.TryParse(
+                                value,
+                                NumberStyles.Integer,
+                                CultureInfo.InvariantCulture,
+                                out referencedId))
+                        {
+                            parameter.Set(
+                                new ElementId(referencedId));
+
+                            detalle =
+                                "ElementId asignado correctamente.";
+
+                            return true;
+                        }
+
+                        detalle =
+                            "El valor no pudo convertirse a ElementId.";
+                        return false;
+
+                    case StorageType.None:
+                        detalle = "StorageType.None no es asignable.";
+                        return false;
+
+                    default:
+                        detalle =
+                            "StorageType no soportado por BimDataSync.";
+                        return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                detalle = ex.Message;
+                return false;
+            }
+        }
+
+        // ============================================================
+        // CONVERTIR TEXTO A DOUBLE
+        // ============================================================
+
+        private bool TryParseDouble(
+            string value,
+            out double result)
+        {
+            // Primero configuración regional de Windows/Excel.
+            if (double.TryParse(
+                    value,
+                    NumberStyles.Number,
+                    CultureInfo.CurrentCulture,
+                    out result))
+            {
+                return true;
+            }
+
+            // Respaldo internacional.
+            if (double.TryParse(
+                    value,
+                    NumberStyles.Number,
+                    CultureInfo.InvariantCulture,
+                    out result))
+            {
+                return true;
+            }
+
+            result = 0;
+            return false;
+        }
+
+        // ============================================================
+        // CREAR REPORTE
+        // ============================================================
+
+        private string CrearReporte(
             string excelPath,
-            List<ParametroNoEncontrado> lista)
+            string sheetName,
+            List<ParametroNoEncontrado> parametrosNoEncontradosLista,
+            List<RegistroSincronizacion> registros,
+            List<string> logErrores)
         {
             string carpeta =
                 Path.GetDirectoryName(excelPath);
@@ -442,15 +681,10 @@ namespace BimDataSync
                     carpeta,
                     nombreArchivo + "_BimDataSync_Log.xlsx");
 
-            // Si no hay parámetros faltantes, no necesitamos generar
-            // un archivo de reporte.
-            if (lista == null || lista.Count == 0)
-                return rutaReporte;
-
             using (XLWorkbook workbook = new XLWorkbook())
             {
                 // ========================================================
-                // HOJA 1 - RESUMEN
+                // HOJA 1 - RESUMEN DE PARAMETROS NO ENCONTRADOS
                 // ========================================================
 
                 IXLWorksheet resumen =
@@ -460,7 +694,7 @@ namespace BimDataSync
                 resumen.Cell(1, 2).Value = "Veces no encontrado";
 
                 var agrupados =
-                    lista
+                    parametrosNoEncontradosLista
                     .GroupBy(x => x.Parametro)
                     .OrderByDescending(x => x.Count());
 
@@ -468,31 +702,18 @@ namespace BimDataSync
 
                 foreach (var grupo in agrupados)
                 {
-                    resumen.Cell(filaResumen, 1).Value =
-                        grupo.Key;
-
-                    resumen.Cell(filaResumen, 2).Value =
-                        grupo.Count();
-
+                    resumen.Cell(filaResumen, 1).Value = grupo.Key;
+                    resumen.Cell(filaResumen, 2).Value = grupo.Count();
                     filaResumen++;
                 }
 
-                // Formato encabezados
-                var headerResumen =
-                    resumen.Range(1, 1, 1, 2);
-
-                headerResumen.Style.Font.Bold = true;
-                headerResumen.Style.Fill.BackgroundColor =
-                    XLColor.Green;
-
-                headerResumen.Style.Font.FontColor =
-                    XLColor.White;
+                FormatearEncabezado(
+                    resumen.Range(1, 1, 1, 2));
 
                 resumen.Columns().AdjustToContents();
 
-
                 // ========================================================
-                // HOJA 2 - DETALLE
+                // HOJA 2 - DETALLE DE PARAMETROS NO ENCONTRADOS
                 // ========================================================
 
                 IXLWorksheet detalle =
@@ -502,38 +723,81 @@ namespace BimDataSync
                 detalle.Cell(1, 2).Value = "Fila Excel";
                 detalle.Cell(1, 3).Value = "ElementID";
                 detalle.Cell(1, 4).Value = "Parámetro";
+                detalle.Cell(1, 5).Value = "Valor Excel";
 
                 int filaDetalle = 2;
 
-                foreach (ParametroNoEncontrado item in lista)
+                foreach (ParametroNoEncontrado item in
+                         parametrosNoEncontradosLista)
                 {
-                    detalle.Cell(filaDetalle, 1).Value =
-                        item.Hoja;
-
-                    detalle.Cell(filaDetalle, 2).Value =
-                        item.Fila;
-
-                    detalle.Cell(filaDetalle, 3).Value =
-                        item.ElementID;
-
-                    detalle.Cell(filaDetalle, 4).Value =
-                        item.Parametro;
-
+                    detalle.Cell(filaDetalle, 1).Value = item.Hoja;
+                    detalle.Cell(filaDetalle, 2).Value = item.Fila;
+                    detalle.Cell(filaDetalle, 3).Value = item.ElementID;
+                    detalle.Cell(filaDetalle, 4).Value = item.Parametro;
+                    detalle.Cell(filaDetalle, 5).Value = item.ValorExcel;
                     filaDetalle++;
                 }
 
-                var headerDetalle =
-                    detalle.Range(1, 1, 1, 4);
-
-                headerDetalle.Style.Font.Bold = true;
-                headerDetalle.Style.Fill.BackgroundColor =
-                    XLColor.Green;
-
-                headerDetalle.Style.Font.FontColor =
-                    XLColor.White;
+                FormatearEncabezado(
+                    detalle.Range(1, 1, 1, 5));
 
                 detalle.Columns().AdjustToContents();
 
+                // ========================================================
+                // HOJA 3 - SINCRONIZACION
+                // ========================================================
+
+                IXLWorksheet sincronizacion =
+                    workbook.Worksheets.Add("Sincronizacion");
+
+                sincronizacion.Cell(1, 1).Value = "Hoja";
+                sincronizacion.Cell(1, 2).Value = "Fila Excel";
+                sincronizacion.Cell(1, 3).Value = "ElementID";
+                sincronizacion.Cell(1, 4).Value = "Parámetro";
+                sincronizacion.Cell(1, 5).Value = "Valor Excel";
+                sincronizacion.Cell(1, 6).Value = "Estado";
+                sincronizacion.Cell(1, 7).Value = "Detalle";
+
+                int filaSync = 2;
+
+                foreach (RegistroSincronizacion item in registros)
+                {
+                    sincronizacion.Cell(filaSync, 1).Value = item.Hoja;
+                    sincronizacion.Cell(filaSync, 2).Value = item.Fila;
+                    sincronizacion.Cell(filaSync, 3).Value = item.ElementID;
+                    sincronizacion.Cell(filaSync, 4).Value = item.Parametro;
+                    sincronizacion.Cell(filaSync, 5).Value = item.ValorExcel;
+                    sincronizacion.Cell(filaSync, 6).Value = item.Estado;
+                    sincronizacion.Cell(filaSync, 7).Value = item.Detalle;
+                    filaSync++;
+                }
+
+                FormatearEncabezado(
+                    sincronizacion.Range(1, 1, 1, 7));
+
+                sincronizacion.Columns().AdjustToContents();
+
+                // ========================================================
+                // HOJA 4 - ERRORES GENERALES
+                // ========================================================
+
+                IXLWorksheet errores =
+                    workbook.Worksheets.Add("Errores");
+
+                errores.Cell(1, 1).Value = "Detalle";
+
+                int filaError = 2;
+
+                foreach (string error in logErrores)
+                {
+                    errores.Cell(filaError, 1).Value = error;
+                    filaError++;
+                }
+
+                FormatearEncabezado(
+                    errores.Range(1, 1, 1, 1));
+
+                errores.Columns().AdjustToContents();
 
                 // ========================================================
                 // GUARDAR
@@ -545,130 +809,20 @@ namespace BimDataSync
             return rutaReporte;
         }
 
+        // ============================================================
+        // FORMATO DE ENCABEZADOS
+        // ============================================================
 
-        // ================================================================
-        // ASIGNAR VALOR AL PARAMETRO
-        // ================================================================
-
-        private bool SetParameterValue(
-            Parameter parameter,
-            string value)
+        private void FormatearEncabezado(IXLRange range)
         {
-            try
-            {
-                switch (parameter.StorageType)
-                {
-                    // ----------------------------------------------------
-                    // STRING
-                    // ----------------------------------------------------
-
-                    case StorageType.String:
-
-                        parameter.Set(value);
-                        return true;
-
-
-                    // ----------------------------------------------------
-                    // INTEGER
-                    // ----------------------------------------------------
-
-                    case StorageType.Integer:
-
-                        if (int.TryParse(
-                                value,
-                                NumberStyles.Integer,
-                                CultureInfo.CurrentCulture,
-                                out int intValue))
-                        {
-                            parameter.Set(intValue);
-                            return true;
-                        }
-
-                        return false;
-
-
-                    // ----------------------------------------------------
-                    // DOUBLE
-                    // ----------------------------------------------------
-
-                    case StorageType.Double:
-
-                        double doubleValue;
-
-                        // Primero interpretar usando la configuración
-                        // regional de Windows/Excel.
-                        if (!double.TryParse(
-                                value,
-                                NumberStyles.Number,
-                                CultureInfo.CurrentCulture,
-                                out doubleValue))
-                        {
-                            // Como respaldo, intentar formato internacional.
-                            if (!double.TryParse(
-                                    value,
-                                    NumberStyles.Number,
-                                    CultureInfo.InvariantCulture,
-                                    out doubleValue))
-                            {
-                                return false;
-                            }
-                        }
-
-                        // Convertir desde la unidad mostrada del parámetro
-                        // hacia las unidades internas de Revit.
-                        double internalValue =
-                            UnitUtils.ConvertToInternalUnits(
-                                doubleValue,
-                                parameter.GetUnitTypeId());
-
-                        parameter.Set(internalValue);
-
-                        return true;
-
-
-                    // ----------------------------------------------------
-                    // ELEMENT ID
-                    // ----------------------------------------------------
-
-                    case StorageType.ElementId:
-
-                        if (long.TryParse(
-                                value,
-                                NumberStyles.Integer,
-                                CultureInfo.CurrentCulture,
-                                out long referencedId))
-                        {
-                            parameter.Set(
-                                new ElementId(referencedId));
-
-                            return true;
-                        }
-
-                        return false;
-
-
-                    // ----------------------------------------------------
-                    // NONE
-                    // ----------------------------------------------------
-
-                    case StorageType.None:
-                        return false;
-
-
-                    default:
-                        return false;
-                }
-            }
-            catch
-            {
-                return false;
-            }
+            range.Style.Font.Bold = true;
+            range.Style.Fill.BackgroundColor = XLColor.Green;
+            range.Style.Font.FontColor = XLColor.White;
         }
     }
 
-
     // ====================================================================
-    // MODELO PARA REGISTRAR PARAMETROS NO ENCONTRADOS
+    // MODELO - PARAMETRO NO ENCONTRADO
     // ====================================================================
 
     public class ParametroNoEncontrado
@@ -677,5 +831,21 @@ namespace BimDataSync
         public int Fila { get; set; }
         public long ElementID { get; set; }
         public string Parametro { get; set; }
+        public string ValorExcel { get; set; }
+    }
+
+    // ====================================================================
+    // MODELO - REGISTRO DE SINCRONIZACION
+    // ====================================================================
+
+    public class RegistroSincronizacion
+    {
+        public string Hoja { get; set; }
+        public int Fila { get; set; }
+        public long ElementID { get; set; }
+        public string Parametro { get; set; }
+        public string ValorExcel { get; set; }
+        public string Estado { get; set; }
+        public string Detalle { get; set; }
     }
 }
